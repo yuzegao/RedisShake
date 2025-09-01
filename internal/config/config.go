@@ -66,9 +66,6 @@ type AdvancedOptions struct {
 	AwsPSync string `mapstructure:"aws_psync" default:""` // 10.0.0.1:6379@nmfu2sl5osync,10.0.0.1:6379@xhma21xfkssync
 
 	EmptyDBBeforeSync bool `mapstructure:"empty_db_before_sync" default:"false"`
-
-	// Skip writing commands if the target key already exists
-	SkipExistingKeys bool `mapstructure:"skip_existing_keys" default:"false"`
 }
 
 type ModuleOptions struct {

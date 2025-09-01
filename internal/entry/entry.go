@@ -21,6 +21,9 @@ type Entry struct {
 
 	// for stat
 	SerializedSize int64
+
+	// for skip_existing_keys feature (only for rdb_reader)
+	RdbReaderSkipExisting bool // true if this entry comes from rdb_reader with skip_existing_keys enabled
 }
 
 func NewEntry() *Entry {

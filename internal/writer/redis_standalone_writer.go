@@ -60,10 +60,8 @@ func NewRedisStandaloneWriter(ctx context.Context, opts *RedisWriterOptions) Wri
 	rw.ch = make(chan *entry.Entry, config.Opt.Advanced.PipelineCountLimit)
 	rw.skippedKeys = make(map[string]bool) // Initialize skipped keys map
 
-	// Create separate client for EXISTS checks if skip_existing_keys is enabled
-	if config.Opt.Advanced.SkipExistingKeys {
-		rw.checkClient = client.NewRedisClient(ctx, opts.Address, opts.Username, opts.Password, opts.Tls, opts.TlsConfig, false)
-	}
+	// Create separate client for EXISTS checks (always create for potential rdb_reader usage)
+	rw.checkClient = client.NewRedisClient(ctx, opts.Address, opts.Username, opts.Password, opts.Tls, opts.TlsConfig, false)
 
 	if opts.OffReply {
 		log.Infof("turn off the reply of write")
@@ -138,7 +136,7 @@ func (w *redisStandaloneWriter) processWrite(ctx context.Context) {
 				w.switchDbTo(e.DbId)
 			}
 			// handle skip_existing_keys logic
-			if config.Opt.Advanced.SkipExistingKeys && w.shouldProcessForSkip(e) {
+			if w.shouldProcessForSkip(e) {
 				continue
 			}
 			// send
@@ -205,6 +203,11 @@ func (w *redisStandaloneWriter) StatusConsistent() bool {
 // shouldProcessForSkip handles the skip_existing_keys logic
 // Returns true if the command should be skipped
 func (w *redisStandaloneWriter) shouldProcessForSkip(e *entry.Entry) bool {
+	// Only process entries from rdb_reader with skip_existing_keys enabled
+	if !e.RdbReaderSkipExisting {
+		return false
+	}
+
 	// Parse entry to get command info if not already parsed
 	if e.CmdName == "" {
 		e.Parse()
@@ -219,21 +222,20 @@ func (w *redisStandaloneWriter) shouldProcessForSkip(e *entry.Entry) bool {
 	keyWithDb := w.getKeyWithDb(key)
 	cmdName := strings.ToUpper(e.CmdName)
 
-	// Handle DEL command - check if key should be skipped, if so, mark it as skipped
-	if cmdName == "DEL" {
+	// Handle different command types for skip_existing_keys logic
+	switch cmdName {
+	case "DEL":
+		// For DEL command - check if key should be skipped, if so, mark it as skipped
 		if w.keyExists(key) {
 			w.skippedKeys[keyWithDb] = true
-			log.Debugf("[%s] mark key as skipped: %s", w.stat.Name, key)
+			log.Debugf("[%s] mark RDB key as skipped: %s", w.stat.Name, key)
 			return true // Skip the DEL command
 		}
 		return false // Key doesn't exist, execute DEL normally
-	}
-
-	// For data-writing commands, check if key is already marked as skipped
-	switch cmdName {
 	case "SET", "HSET", "HMSET", "LPUSH", "RPUSH", "SADD", "ZADD", "MSET":
+		// For data-writing commands, check if key is already marked as skipped
 		if w.skippedKeys[keyWithDb] {
-			log.Debugf("[%s] skip command for existing key: %s", w.stat.Name, key)
+			log.Debugf("[%s] skip RDB command for existing key: %s", w.stat.Name, key)
 			return true // Skip this command
 		}
 	}

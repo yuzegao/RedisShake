@@ -57,6 +57,9 @@ type Loader struct {
 
 	name       string
 	updateFunc func(int64)
+
+	// for rdb_reader skip_existing_keys feature
+	skipExistingKeys bool
 }
 
 func NewLoader(name string, updateFunc func(int64), filPath string, ch chan *entry.Entry) *Loader {
@@ -65,6 +68,14 @@ func NewLoader(name string, updateFunc func(int64), filPath string, ch chan *ent
 	ld.filPath = filPath
 	ld.name = name
 	ld.updateFunc = updateFunc
+	ld.skipExistingKeys = false // Default: not enabled
+	return ld
+}
+
+// NewLoaderWithSkip creates a new loader with skip_existing_keys option
+func NewLoaderWithSkip(name string, updateFunc func(int64), filPath string, ch chan *entry.Entry, skipExistingKeys bool) *Loader {
+	ld := NewLoader(name, updateFunc, filPath, ch)
+	ld.skipExistingKeys = skipExistingKeys
 	return ld
 }
 
@@ -136,6 +147,7 @@ func (ld *Loader) parseRDBEntry(ctx context.Context, rd *bufio.Reader) {
 			log.Debugf("function: %s", function)
 			e := entry.NewEntry()
 			e.Argv = []string{"function", "load", function}
+			e.RdbReaderSkipExisting = ld.skipExistingKeys
 			ld.ch <- e
 		case kFlagModuleAux:
 			moduleId := structure.ReadLength(rd) // module id
@@ -176,6 +188,7 @@ func (ld *Loader) parseRDBEntry(ctx context.Context, rd *bufio.Reader) {
 			} else if key == "lua" {
 				e := entry.NewEntry()
 				e.Argv = []string{"script", "load", value}
+				e.RdbReaderSkipExisting = ld.skipExistingKeys
 				ld.ch <- e
 				log.Debugf("[%s] LUA script: [%s]", ld.name, value)
 			} else {
@@ -207,12 +220,14 @@ func (ld *Loader) parseRDBEntry(ctx context.Context, rd *bufio.Reader) {
 				e := entry.NewEntry()
 				e.DbId = ld.nowDBId
 				e.Argv = cmd
+				e.RdbReaderSkipExisting = ld.skipExistingKeys
 				ld.ch <- e
 			}
 			if ld.expireMs != 0 {
 				e := entry.NewEntry()
 				e.DbId = ld.nowDBId
 				e.Argv = []string{"PEXPIRE", key, strconv.FormatInt(ld.expireMs, 10)}
+				e.RdbReaderSkipExisting = ld.skipExistingKeys
 				ld.ch <- e
 			}
 			ld.expireMs = 0

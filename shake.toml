@@ -25,6 +25,7 @@ try_diskless = false       # Set to true for diskless sync if the source has rep
 
 # [rdb_reader]
 # filepath = "/tmp/dump.rdb"
+# skip_existing_keys = false  # Skip writing commands if the target key already exists (RDB reader only)
 
 # [aof_reader]
 # filepath = "/tmp/.aof"
@@ -157,13 +158,7 @@ aws_psync = "" # example: aws_psync = "10.0.0.1:6379@nmfu2sl5osync,10.0.0.1:6379
 #   repl-diskless-load on-empty-db
 empty_db_before_sync = false
 
-# Skip writing commands if the target key already exists
-# This applies to all reader modes (rdb, aof, sync, scan)
-# Logic: When a DEL command is encountered, check if the key exists
-#        If yes, mark the key as skipped and skip all subsequent data commands for that key
-#        If no, proceed normally with the DEL and subsequent commands
-# Supported commands: SET, HSET, HMSET, LPUSH, RPUSH, SADD, ZADD, MSET
-skip_existing_keys = false
+
 
 [module]
 # The data format for BF.LOADCHUNK is not compatible in different versions. v2.6.3 <=> 20603

@@ -13,11 +13,13 @@ import (
 )
 
 type RdbReaderOptions struct {
-	Filepath string `mapstructure:"filepath" default:""`
+	Filepath         string `mapstructure:"filepath" default:""`
+	SkipExistingKeys bool   `mapstructure:"skip_existing_keys" default:"false"`
 }
 
 type rdbReader struct {
-	ch chan *entry.Entry
+	ch               chan *entry.Entry
+	skipExistingKeys bool
 
 	stat struct {
 		Name          string `json:"name"`
@@ -39,6 +41,7 @@ func NewRDBReader(opts *RdbReaderOptions) Reader {
 	r.stat.Filepath = absolutePath
 	r.stat.FileSizeBytes = int64(utils.GetFileSize(absolutePath))
 	r.stat.FileSizeHuman = humanize.Bytes(uint64(r.stat.FileSizeBytes))
+	r.skipExistingKeys = opts.SkipExistingKeys
 	return r
 }
 
@@ -51,7 +54,7 @@ func (r *rdbReader) StartRead(ctx context.Context) []chan *entry.Entry {
 		r.stat.Percent = fmt.Sprintf("%.2f%%", float64(offset)/float64(r.stat.FileSizeBytes)*100)
 		r.stat.Status = fmt.Sprintf("[%s] rdb file synced: %s", r.stat.Name, r.stat.Percent)
 	}
-	rdbLoader := rdb.NewLoader(r.stat.Name, updateFunc, r.stat.Filepath, r.ch)
+	rdbLoader := rdb.NewLoaderWithSkip(r.stat.Name, updateFunc, r.stat.Filepath, r.ch, r.skipExistingKeys)
 
 	go func() {
 		_ = rdbLoader.ParseRDB(ctx)
