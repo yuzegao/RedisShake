@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"go.uber.org/ratelimit"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"go.uber.org/ratelimit"
 
 	"RedisShake/internal/client"
 	"RedisShake/internal/client/proto"
@@ -121,6 +122,13 @@ func (w *redisStandaloneWriter) processWrite(ctx context.Context) {
 			if w.DbId != e.DbId {
 				w.switchDbTo(e.DbId)
 			}
+			// skip if key exists and skip_existing_keys is enabled
+			if config.Opt.Advanced.SkipExistingKeys && w.shouldCheckKeyExists(e) {
+				if w.keyExists(e.Keys[0]) {
+					log.Debugf("[%s] skip existing key: %s", w.stat.Name, e.Keys[0])
+					continue
+				}
+			}
 			// send
 			bytes := e.Serialize()
 			for e.SerializedSize+atomic.LoadInt64(&w.stat.UnansweredBytes) > config.Opt.Advanced.TargetRedisClientMaxQuerybufLen {
@@ -180,4 +188,36 @@ func (w *redisStandaloneWriter) StatusString() string {
 
 func (w *redisStandaloneWriter) StatusConsistent() bool {
 	return atomic.LoadInt64(&w.stat.UnansweredBytes) == 0 && atomic.LoadInt64(&w.stat.UnansweredEntries) == 0
+}
+
+// shouldCheckKeyExists determines if we should check key existence for this entry
+func (w *redisStandaloneWriter) shouldCheckKeyExists(e *entry.Entry) bool {
+	// Parse entry to get command info if not already parsed
+	if e.CmdName == "" {
+		e.Parse()
+	}
+
+	// Only check for commands that write data and have at least one key
+	if len(e.Keys) == 0 {
+		return false
+	}
+
+	// Check if this is a data-writing command that should respect existing keys
+	cmdName := strings.ToUpper(e.CmdName)
+	switch cmdName {
+	case "SET", "HSET", "HMSET", "LPUSH", "RPUSH", "SADD", "ZADD":
+		return true
+	case "MSET": // Handle MSET specially as it has multiple keys
+		return true
+	case "RESTORE": // RESTORE command will check key existence itself
+		return false
+	default:
+		return false
+	}
+}
+
+// keyExists checks if a key exists in the target Redis
+func (w *redisStandaloneWriter) keyExists(key string) bool {
+	reply := w.client.DoWithStringReply("EXISTS", key)
+	return reply == "1"
 }
