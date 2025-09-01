@@ -159,7 +159,10 @@ empty_db_before_sync = false
 
 # Skip writing commands if the target key already exists
 # This applies to all reader modes (rdb, aof, sync, scan)
-# Supported commands: SET, HSET, HMSET, LPUSH, RPUSH, SADD, ZADD, RESTORE, MSET
+# Logic: When a DEL command is encountered, check if the key exists
+#        If yes, mark the key as skipped and skip all subsequent data commands for that key
+#        If no, proceed normally with the DEL and subsequent commands
+# Supported commands: SET, HSET, HMSET, LPUSH, RPUSH, SADD, ZADD, MSET
 skip_existing_keys = false
 
 [module]

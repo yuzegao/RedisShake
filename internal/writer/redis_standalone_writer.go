@@ -41,6 +41,10 @@ type redisStandaloneWriter struct {
 	ch          chan *entry.Entry
 	chWg        sync.WaitGroup
 
+	// For skip_existing_keys feature
+	skippedKeys map[string]bool // Track keys that should be skipped in current session
+	checkClient *client.Redis   // Separate client for EXISTS checks to avoid pipeline conflicts
+
 	stat struct {
 		Name              string `json:"name"`
 		UnansweredBytes   int64  `json:"unanswered_bytes"`
@@ -54,6 +58,13 @@ func NewRedisStandaloneWriter(ctx context.Context, opts *RedisWriterOptions) Wri
 	rw.stat.Name = "writer_" + strings.Replace(opts.Address, ":", "_", -1)
 	rw.client = client.NewRedisClient(ctx, opts.Address, opts.Username, opts.Password, opts.Tls, opts.TlsConfig, false)
 	rw.ch = make(chan *entry.Entry, config.Opt.Advanced.PipelineCountLimit)
+	rw.skippedKeys = make(map[string]bool) // Initialize skipped keys map
+
+	// Create separate client for EXISTS checks if skip_existing_keys is enabled
+	if config.Opt.Advanced.SkipExistingKeys {
+		rw.checkClient = client.NewRedisClient(ctx, opts.Address, opts.Username, opts.Password, opts.Tls, opts.TlsConfig, false)
+	}
+
 	if opts.OffReply {
 		log.Infof("turn off the reply of write")
 		rw.offReply = true
@@ -72,6 +83,10 @@ func (w *redisStandaloneWriter) Close() {
 		w.chWg.Wait()
 		close(w.chWaitReply)
 		w.chWaitWg.Wait()
+	}
+	// Close the separate check client if it exists
+	if w.checkClient != nil {
+		w.checkClient.Close()
 	}
 }
 
@@ -122,12 +137,9 @@ func (w *redisStandaloneWriter) processWrite(ctx context.Context) {
 			if w.DbId != e.DbId {
 				w.switchDbTo(e.DbId)
 			}
-			// skip if key exists and skip_existing_keys is enabled
-			if config.Opt.Advanced.SkipExistingKeys && w.shouldCheckKeyExists(e) {
-				if w.keyExists(e.Keys[0]) {
-					log.Debugf("[%s] skip existing key: %s", w.stat.Name, e.Keys[0])
-					continue
-				}
+			// handle skip_existing_keys logic
+			if config.Opt.Advanced.SkipExistingKeys && w.shouldProcessForSkip(e) {
+				continue
 			}
 			// send
 			bytes := e.Serialize()
@@ -190,34 +202,71 @@ func (w *redisStandaloneWriter) StatusConsistent() bool {
 	return atomic.LoadInt64(&w.stat.UnansweredBytes) == 0 && atomic.LoadInt64(&w.stat.UnansweredEntries) == 0
 }
 
-// shouldCheckKeyExists determines if we should check key existence for this entry
-func (w *redisStandaloneWriter) shouldCheckKeyExists(e *entry.Entry) bool {
+// shouldProcessForSkip handles the skip_existing_keys logic
+// Returns true if the command should be skipped
+func (w *redisStandaloneWriter) shouldProcessForSkip(e *entry.Entry) bool {
 	// Parse entry to get command info if not already parsed
 	if e.CmdName == "" {
 		e.Parse()
 	}
 
-	// Only check for commands that write data and have at least one key
+	// Only process commands that have at least one key
 	if len(e.Keys) == 0 {
 		return false
 	}
 
-	// Check if this is a data-writing command that should respect existing keys
+	key := e.Keys[0]
+	keyWithDb := w.getKeyWithDb(key)
 	cmdName := strings.ToUpper(e.CmdName)
-	switch cmdName {
-	case "SET", "HSET", "HMSET", "LPUSH", "RPUSH", "SADD", "ZADD":
-		return true
-	case "MSET": // Handle MSET specially as it has multiple keys
-		return true
-	case "RESTORE": // RESTORE command will check key existence itself
-		return false
-	default:
-		return false
+
+	// Handle DEL command - check if key should be skipped, if so, mark it as skipped
+	if cmdName == "DEL" {
+		if w.keyExists(key) {
+			w.skippedKeys[keyWithDb] = true
+			log.Debugf("[%s] mark key as skipped: %s", w.stat.Name, key)
+			return true // Skip the DEL command
+		}
+		return false // Key doesn't exist, execute DEL normally
 	}
+
+	// For data-writing commands, check if key is already marked as skipped
+	switch cmdName {
+	case "SET", "HSET", "HMSET", "LPUSH", "RPUSH", "SADD", "ZADD", "MSET":
+		if w.skippedKeys[keyWithDb] {
+			log.Debugf("[%s] skip command for existing key: %s", w.stat.Name, key)
+			return true // Skip this command
+		}
+	}
+
+	return false // Don't skip
+}
+
+// getKeyWithDb returns a unique key identifier including database
+func (w *redisStandaloneWriter) getKeyWithDb(key string) string {
+	return fmt.Sprintf("db%d:%s", w.DbId, key)
 }
 
 // keyExists checks if a key exists in the target Redis
 func (w *redisStandaloneWriter) keyExists(key string) bool {
-	reply := w.client.DoWithStringReply("EXISTS", key)
-	return reply == "1"
+	if w.checkClient == nil {
+		// Fallback: if checkClient is not available, assume key doesn't exist
+		return false
+	}
+
+	// Ensure we're on the correct database
+	if w.DbId != 0 {
+		w.checkClient.DoWithStringReply("SELECT", strconv.Itoa(w.DbId))
+	}
+
+	reply := w.checkClient.Do("EXISTS", key)
+	switch v := reply.(type) {
+	case int64:
+		return v == 1
+	case int:
+		return v == 1
+	case string:
+		return v == "1"
+	default:
+		return false // On unexpected type, assume key doesn't exist and proceed with write
+	}
 }
